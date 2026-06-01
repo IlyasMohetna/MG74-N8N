@@ -81,7 +81,7 @@ services:
       - "5678:5678"
     environment:
       <<: *shared-env
-      EXECUTIONS_MODE: queue          # use Redis queue for scaling
+      EXECUTIONS_MODE: regular          # use Redis queue for scaling
       N8N_EDITOR_BASE_URL: ${WEBHOOK_URL}
       # Uncomment to enable basic auth
       # N8N_BASIC_AUTH_ACTIVE: "true"
