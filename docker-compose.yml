@@ -1,0 +1,132 @@
+version: "3.8"
+
+volumes:
+  n8n_storage:
+  postgres_storage:
+  redis_storage:
+
+networks:
+  n8n_network:
+    driver: bridge
+
+x-shared-env: &shared-env
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_PORT: 5432
+  DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+  DB_POSTGRESDB_USER: ${POSTGRES_USER}
+  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+  QUEUE_BULL_REDIS_HOST: redis
+  QUEUE_BULL_REDIS_PORT: 6379
+  QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+  N8N_HOST: ${N8N_HOST}
+  N8N_PORT: 5678
+  N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+  WEBHOOK_URL: ${WEBHOOK_URL}
+  GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+  NODE_ENV: production
+
+services:
+
+  # ─────────────────────────────────────────
+  # PostgreSQL Database
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: n8n_postgres
+    restart: unless-stopped
+    networks:
+      - n8n_network
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_storage:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # Redis (queue backend)
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: n8n_redis
+    restart: unless-stopped
+    networks:
+      - n8n_network
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_storage:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # n8n Main (webhook + UI)
+  # ─────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_main
+    restart: unless-stopped
+    networks:
+      - n8n_network
+    ports:
+      - "5678:5678"
+    environment:
+      <<: *shared-env
+      EXECUTIONS_MODE: queue          # use Redis queue for scaling
+      N8N_EDITOR_BASE_URL: ${WEBHOOK_URL}
+      # Uncomment to enable basic auth
+      # N8N_BASIC_AUTH_ACTIVE: "true"
+      # N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      # N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - ./local_files:/files           # optional: mount local files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
+  # n8n Worker (scales independently)
+  # ─────────────────────────────────────────
+  n8n_worker:
+    image: n8nio/n8n:latest
+    container_name: n8n_worker
+    restart: unless-stopped
+    networks:
+      - n8n_network
+    command: worker
+    environment:
+      <<: *shared-env
+      EXECUTIONS_MODE: queue
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - ./local_files:/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok
+    networks: ['n8n_network']
+    restart: unless-stopped
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: http n8n:5678 --log=stdout
+    ports:
+      - 4040:4040
+    depends_on:
+      - n8n
